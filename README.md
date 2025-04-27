@@ -142,7 +142,7 @@ It will spin up:
 
 ## License
 
-MIT License. See `LICENSE` for details.
+Apache v2 License. See `LICENSE` for details.
 
 ---
 
