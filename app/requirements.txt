@@ -1,2 +1,4 @@
 influxdb_client
 requests
+paho-mqtt
+dotenv

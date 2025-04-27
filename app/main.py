@@ -2,24 +2,35 @@ import requests
 import time
 from influxdb_client import InfluxDBClient, Point, WriteOptions
 import os
+import paho.mqtt.client as mqtt
+from dotenv import load_dotenv
 
+# Load environment variables
+load_dotenv()
 
+# API Config
 API_URL = os.getenv("API_URL", "https://api.iternio.com/1/session/get_tlm")  # default fallback if needed
 API_KEY = os.getenv("API_KEY")
 SESSION_ID = os.getenv("SESSION_ID")
 WAKEUP_VEHICLE_ID = int(os.getenv("WAKEUP_VEHICLE_ID"))
 
+# InfluxDB Config
 INFLUXDB_URL = os.getenv("INFLUXDB_URL", "http://localhost:8086")
 INFLUXDB_TOKEN = os.getenv("INFLUXDB_TOKEN")
 INFLUXDB_BUCKET = os.getenv("INFLUXDB_BUCKET")
 INFLUXDB_ORG = os.getenv("INFLUXDB_ORG")
 
+# MQTT Config
+MQTT_BROKER = os.getenv("MQTT_BROKER")
+MQTT_PORT = int(os.getenv("MQTT_PORT", 1883))
+MQTT_USERNAME = os.getenv("MQTT_USERNAME")
+MQTT_PASSWORD = os.getenv("MQTT_PASSWORD")
+MQTT_TOPIC_PREFIX = os.getenv("MQTT_TOPIC_PREFIX", "car/telemetry")
+
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", 10))
 
 if not all([API_KEY, SESSION_ID, WAKEUP_VEHICLE_ID, INFLUXDB_TOKEN]):
     raise ValueError("Missing required environment variables!")
-
-
 
 # === HEADERS ===
 HEADERS = {
@@ -44,6 +55,22 @@ def fetch_data():
     response = requests.post(API_URL, headers=HEADERS, json=payload)
     response.raise_for_status()
     return response.json()
+
+def publish_to_mqtt(data):
+    if MQTT_BROKER is None:
+        print("MQTT_BROKER is not set, skipping...")
+        return
+    
+    # Initialize MQTT Client
+    mqtt_client = mqtt.Client()
+    if MQTT_USERNAME and MQTT_PASSWORD:
+        mqtt_client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
+    mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
+    mqtt_client.loop_start()
+
+    for key, value in data.items():
+        topic = f"{MQTT_TOPIC_PREFIX}/{key}"
+        mqtt_client.publish(topic, payload=value, qos=1, retain=True)
 
 def write_to_influxdb(client, measurement_name, data):
     write_api = client.write_api(write_options=WriteOptions(batch_size=1))
@@ -107,6 +134,28 @@ def write_to_influxdb(client, measurement_name, data):
         # Write to InfluxDB
         write_api.write(bucket=INFLUXDB_BUCKET, org=INFLUXDB_ORG, record=point)
 
+def push_mqtt_message(data):
+    if data.get("status") != "ok":
+        print("API response not OK, skipping...")
+        return
+    
+    for vehicle_data in data.get("result", []):
+        tlm = vehicle_data.get("tlm", {})
+
+        # MQTT Publish
+        mqtt_payload = {
+            "soc": tlm.get("soc"),
+            "is_charging": tlm.get("is_charging"),
+            "latitude": tlm.get("lat"),
+            "longitude": tlm.get("lon"),
+            "vehicle_temp": tlm.get("vehicle_temp"),
+            "traffic_speed": tlm.get("traffic_speed"),
+            "vehicle_id": vehicle_data.get("vehicle_id"),
+            "car_model": vehicle_data.get("car_model"),
+            "owner_name": vehicle_data.get("owner_name")
+        }
+        publish_to_mqtt(mqtt_payload)
+
 def main():
     influx_client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
 
@@ -115,6 +164,7 @@ def main():
             data = fetch_data()
             print(f"Fetched data: {data}")
             write_to_influxdb(influx_client, "telemetry", data)
+            push_mqtt_message(data)
         except Exception as e:
             print(f"Error occurred: {e}")
         
